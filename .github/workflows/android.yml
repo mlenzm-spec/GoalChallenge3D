@@ -28,6 +28,8 @@ jobs:
 
       - name: Android SDK einrichten
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''   # Standard wäre "tools", das gibt es bei Google nicht mehr
 
       - name: Android-SDK-Pakete installieren
         run: sdkmanager "platform-tools" "build-tools;35.0.0" "platforms;android-35"
