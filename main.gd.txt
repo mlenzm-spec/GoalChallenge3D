@@ -1,0 +1,385 @@
+
+extends Node3D
+
+const MAX_LEVEL := 300
+const BALL_START := Vector3(0, 0.6, 9)
+
+var level := 1
+var score := 0
+var ball: RigidBody3D
+var goal_area: Area3D
+var arena: Node3D
+var camera: Camera3D
+var rotating_objects: Array = []
+
+var touch_start := Vector2.ZERO
+var dragging := false
+var can_shoot := true
+var completed := false
+
+var hud: CanvasLayer
+var level_label: Label
+var message_label: Label
+var progress_label: Label
+
+
+func _ready():
+    load_game()
+    create_camera()
+    create_lighting()
+    create_hud()
+    create_level()
+
+
+func create_camera():
+    camera = Camera3D.new()
+    camera.position = Vector3(0, 13, 15)
+    camera.look_at(Vector3(0, 0, -2), Vector3.UP)
+    camera.fov = 48
+    add_child(camera)
+    camera.current = true
+
+
+func create_lighting():
+    var light = DirectionalLight3D.new()
+    light.rotation_degrees = Vector3(-55, -25, 0)
+    light.light_energy = 1.4
+    add_child(light)
+
+    var world = WorldEnvironment.new()
+    var env = Environment.new()
+    env.background_mode = Environment.BG_SKY
+    env.sky = Sky.new()
+    env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+    env.ambient_light_color = Color(0.55, 0.65, 0.85)
+    env.ambient_light_energy = 0.7
+    world.environment = env
+    add_child(world)
+
+
+func make_material(color: Color) -> StandardMaterial3D:
+    var mat = StandardMaterial3D.new()
+    mat.albedo_color = color
+    mat.metallic = 0.1
+    mat.roughness = 0.65
+    return mat
+
+
+func create_box(parent: Node3D, size: Vector3,
+        pos: Vector3, color: Color, physics := true) -> Node3D:
+
+    var body: Node3D
+
+    if physics:
+        body = StaticBody3D.new()
+        var collision = CollisionShape3D.new()
+        var shape = BoxShape3D.new()
+        shape.size = size
+        collision.shape = shape
+        body.add_child(collision)
+    else:
+        body = Node3D.new()
+
+    var mesh_instance = MeshInstance3D.new()
+    var mesh = BoxMesh.new()
+    mesh.size = size
+    mesh_instance.mesh = mesh
+    mesh_instance.material_override = make_material(color)
+
+    body.add_child(mesh_instance)
+    body.position = pos
+    parent.add_child(body)
+
+    return body
+
+
+func create_level():
+    completed = false
+    can_shoot = true
+    rotating_objects.clear()
+
+    arena = Node3D.new()
+    arena.name = "Arena"
+    add_child(arena)
+
+    # Spielfeld
+    create_box(arena, Vector3(8, 0.5, 24),
+        Vector3(0, -0.25, 0), Color(0.12, 0.55, 0.24))
+
+    # Spielfeldbegrenzungen
+    create_box(arena, Vector3(0.4, 1, 24),
+        Vector3(-4, 0.25, 0), Color.WHITE)
+
+    create_box(arena, Vector3(0.4, 1, 24),
+        Vector3(4, 0.25, 0), Color.WHITE)
+
+    create_box(arena, Vector3(8, 1, 0.4),
+        Vector3(0, 0.25, 12), Color.WHITE)
+
+    create_goal()
+    create_obstacles()
+    create_ball()
+
+    update_hud()
+
+
+func create_goal():
+    var z = -10.5
+
+    # Torpfosten
+    create_box(arena, Vector3(0.25, 2.3, 0.25),
+        Vector3(-1.6, 1.15, z), Color.WHITE)
+
+    create_box(arena, Vector3(0.25, 2.3, 0.25),
+        Vector3(1.6, 1.15, z), Color.WHITE)
+
+    # Querlatte
+    create_box(arena, Vector3(3.45, 0.25, 0.25),
+        Vector3(0, 2.3, z), Color.WHITE)
+
+    # Torerkennung
+    goal_area = Area3D.new()
+
+    var shape = CollisionShape3D.new()
+    var box = BoxShape3D.new()
+    box.size = Vector3(3.1, 2.2, 1.0)
+    shape.shape = box
+
+    goal_area.add_child(shape)
+    goal_area.position = Vector3(0, 1.1, z - 0.3)
+    goal_area.collision_mask = 1
+    goal_area.body_entered.connect(on_goal_entered)
+
+    arena.add_child(goal_area)
+
+
+func create_obstacles():
+    var count = min(2 + int(level / 12), 18)
+    var gap_width = max(0.85, 2.8 - level * 0.006)
+
+    for i in range(count):
+        var z = 6.0 - float(i) * (12.0 / count)
+        var gap_center = sin(float(i) * 2.1 + level) * 1.5
+
+        var left_width = gap_center + 3.7 - gap_width / 2
+        var right_width = 3.7 - gap_center - gap_width / 2
+
+        if left_width > 0.2:
+            create_box(arena,
+                Vector3(left_width, 0.7, 0.55),
+                Vector3(-3.7 + left_width / 2, 0.35, z),
+                Color(0.9, 0.3, 0.12))
+
+        if right_width > 0.2:
+            create_box(arena,
+                Vector3(right_width, 0.7, 0.55),
+                Vector3(gap_center + gap_width / 2 + right_width / 2, 0.35, z),
+                Color(0.9, 0.3, 0.12))
+
+        # Rotierende Hindernisse ab Level 15
+        if level >= 15 and i % 2 == 0:
+            var bar = create_box(arena,
+                Vector3(2.8, 0.25, 0.35),
+                Vector3(0, 0.8, z - 0.5),
+                Color(1, 0.75, 0.05))
+
+            bar.set_meta("rotation_speed",
+                0.5 + float(level) / 150.0)
+
+            rotating_objects.append(bar)
+
+
+func create_ball():
+    ball = RigidBody3D.new()
+    ball.name = "Football"
+    ball.position = BALL_START
+    ball.mass = 0.5
+    ball.gravity_scale = 1.0
+    ball.continuous_cd = true
+    ball.linear_damp = 0.3
+    ball.angular_damp = 0.3
+    ball.collision_layer = 1
+    ball.collision_mask = 1
+
+    var collision = CollisionShape3D.new()
+    var sphere = SphereShape3D.new()
+    sphere.radius = 0.48
+    collision.shape = sphere
+    ball.add_child(collision)
+
+    var mesh_instance = MeshInstance3D.new()
+    var mesh = SphereMesh.new()
+    mesh.radius = 0.48
+    mesh.height = 0.96
+
+    mesh_instance.mesh = mesh
+    mesh_instance.material_override = make_material(Color.WHITE)
+
+    ball.add_child(mesh_instance)
+    arena.add_child(ball)
+
+
+func create_hud():
+    hud = CanvasLayer.new()
+    add_child(hud)
+
+    var panel = ColorRect.new()
+    panel.color = Color(0.02, 0.05, 0.1, 0.85)
+    panel.position = Vector2(0, 0)
+    panel.size = Vector2(720, 145)
+    hud.add_child(panel)
+
+    level_label = Label.new()
+    level_label.position = Vector2(25, 15)
+    level_label.add_theme_font_size_override("font_size", 35)
+    level_label.add_theme_color_override("font_color", Color.WHITE)
+    hud.add_child(level_label)
+
+    progress_label = Label.new()
+    progress_label.position = Vector2(25, 70)
+    progress_label.add_theme_font_size_override("font_size", 23)
+    progress_label.add_theme_color_override("font_color", Color.YELLOW)
+    hud.add_child(progress_label)
+
+    message_label = Label.new()
+    message_label.position = Vector2(80, 500)
+    message_label.size = Vector2(560, 100)
+    message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    message_label.add_theme_font_size_override("font_size", 32)
+    message_label.add_theme_color_override("font_color", Color.WHITE)
+    hud.add_child(message_label)
+
+    var reset_button = Button.new()
+    reset_button.text = "NEUSTART"
+    reset_button.position = Vector2(490, 35)
+    reset_button.size = Vector2(190, 70)
+    reset_button.add_theme_font_size_override("font_size", 23)
+    reset_button.pressed.connect(restart_level)
+    hud.add_child(reset_button)
+
+    var instruction = Label.new()
+    instruction.text = "ZIEHEN UND LOSLASSEN = SCHIESSEN"
+    instruction.position = Vector2(90, 1120)
+    instruction.size = Vector2(540, 70)
+    instruction.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    instruction.add_theme_font_size_override("font_size", 22)
+    instruction.add_theme_color_override("font_color", Color.WHITE)
+    hud.add_child(instruction)
+
+
+func update_hud():
+    level_label.text = "GOAL CHALLENGE 3D"
+    progress_label.text = "LEVEL %d / %d     STERNE: %d" % [
+        level, MAX_LEVEL, score
+    ]
+
+
+func _input(event):
+    if completed:
+        return
+
+    if event is InputEventScreenTouch:
+        if event.pressed:
+            touch_start = event.position
+            dragging = true
+        else:
+            if dragging:
+                shoot(event.position - touch_start)
+            dragging = false
+
+    elif event is InputEventScreenDrag:
+        pass
+
+    elif event is InputEventMouseButton:
+        if event.button_index == MOUSE_BUTTON_LEFT:
+            if event.pressed:
+                touch_start = event.position
+                dragging = true
+            else:
+                if dragging:
+                    shoot(event.position - touch_start)
+                dragging = false
+
+
+func shoot(drag: Vector2):
+    if not can_shoot or ball == null:
+        return
+
+    if drag.length() < 15:
+        return
+
+    can_shoot = false
+
+    # Korrigierte Schussrichtung
+    var impulse = Vector3(
+        drag.x * 0.025,
+        0,
+        drag.y * 0.035
+    )
+
+    impulse = impulse.limit_length(18.0)
+    impulse.y = min(drag.length() * 0.008, 3.0)
+
+    ball.apply_central_impulse(impulse)
+    message_label.text = "LOS GEHT'S!"
+
+
+func on_goal_entered(body):
+    if body == ball and not completed:
+        completed = true
+        score += 1
+
+        message_label.text = "TOR!!!"
+
+        save_game()
+
+        if level >= MAX_LEVEL:
+            message_label.text = "ALLE 300 LEVEL GESCHAFFT!"
+            return
+
+        await get_tree().create_timer(1.5).timeout
+
+        level += 1
+
+        if is_instance_valid(arena):
+            arena.queue_free()
+
+        create_level()
+
+
+func restart_level():
+    if is_instance_valid(arena):
+        arena.queue_free()
+
+    create_level()
+    message_label.text = "VIEL ERFOLG!"
+
+
+func _process(delta):
+    for obj in rotating_objects:
+        if is_instance_valid(obj):
+            obj.rotate_y(obj.get_meta("rotation_speed") * delta)
+
+    if ball != null and is_instance_valid(ball):
+        if ball.position.y < -4 or abs(ball.position.x) > 6:
+            restart_level()
+
+
+func save_game():
+    var file = FileAccess.open("user://savegame.dat", FileAccess.WRITE)
+
+    if file:
+        file.store_var({
+            "level": level,
+            "score": score
+        })
+
+
+func load_game():
+    if FileAccess.file_exists("user://savegame.dat"):
+        var file = FileAccess.open("user://savegame.dat", FileAccess.READ)
+
+        if file:
+            var data = file.get_var()
+            level = clampi(data.get("level", 1), 1, MAX_LEVEL)
+            score = data.get("score", 0)
